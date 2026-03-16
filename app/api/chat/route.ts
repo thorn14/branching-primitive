@@ -26,6 +26,7 @@ import {
   assembleContext,
   detectFork,
   getLatestTurnInThread,
+  getTurn,
   getThread,
   buildBranchContextHeader,
 } from '@/lib/canvas';
@@ -72,12 +73,7 @@ export async function POST(req: NextRequest) {
   // If this is the first message in a forked thread, prepend the branch context header.
   let userContent = content;
   if (thread.fork_turn_id && !getLatestTurnInThread(threadId)) {
-    // First message in a forked thread.
-    const parentThread = getLatestTurnInThread(thread.fork_turn_id)
-      ? undefined
-      : undefined;
-    // We need the parent thread id. Resolve via the fork turn.
-    const { getTurn } = await import('@/lib/canvas');
+    // First message in a forked thread — prepend branch context header.
     const forkTurn = getTurn(thread.fork_turn_id);
     if (forkTurn) {
       const header = buildBranchContextHeader({
@@ -102,16 +98,11 @@ export async function POST(req: NextRequest) {
   // Assemble full ancestry as messages array.
   const messages = assembleContext(userTurn.id);
 
-  // Stream the response.
-  let fullResponse = '';
-
   const result = await streamText({
     model: baseten(MODEL),
     system: SYSTEM_PROMPT,
     messages,
     onFinish: async ({ text }) => {
-      fullResponse = text;
-
       // Persist the assistant turn.
       addTurn({
         threadId,
@@ -119,18 +110,19 @@ export async function POST(req: NextRequest) {
         role: 'assistant',
         content: text,
       });
+
+      // v1 fork detection: string match on completed response text.
+      // TODO: replace with suggest_fork tool call for real-time, typed detection.
+      const fork = detectFork(text);
+      if (fork.detected) {
+        console.log(`[fork detected] Path A: ${fork.pathA} | Path B: ${fork.pathB}`);
+        // Fork metadata is logged here. Surfacing it to the client over a
+        // streaming response requires either a trailing data annotation or
+        // a follow-up GET. The suggest_fork tool call approach handles this
+        // cleanly via toolCall stream events — another reason to migrate.
+      }
     },
   });
 
-  // Return as a data stream. Fork detection runs after stream completes
-  // and is surfaced via response headers for the client to handle.
-  const response = result.toDataStreamResponse();
-
-  // Detect fork in response after full text is available.
-  // We attach fork metadata to response headers for non-streaming clients
-  // and as a note: for streaming clients, fork detection requires reading
-  // the full stream first. A production implementation would use a tool call.
-  // TODO: replace detectFork string matching with suggest_fork tool call.
-
-  return response;
+  return result.toDataStreamResponse();
 }
